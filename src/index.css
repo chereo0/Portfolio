@@ -1,10 +1,10 @@
 @import "tailwindcss";
 
 @theme {
-  --color-neon-cyan: #06b6d4;
-  --color-neon-blue: #3b82f6;
-  --color-dark-bg: #050b12;
-  --color-card-bg: #0b1520;
+  --color-neon-cyan: #d6b478;
+  --color-neon-blue: #b08a4a;
+  --color-dark-bg: #0d0b09;
+  --color-card-bg: #17130f;
   
   --font-sans: "Inter", sans-serif;
 }
@@ -37,7 +37,7 @@ body {
 }
 
 ::-webkit-scrollbar-track {
-  background: #050b12;
+  background: #0d0b09;
 }
 
 ::-webkit-scrollbar-thumb {

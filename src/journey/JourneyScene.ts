@@ -1,33 +1,36 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import {
-    AVENUE_HALF,
+    BOARD_END_Z,
+    BUS,
     CAMERA_KEYS,
-    CITY_END_Z,
-    CROSS_STREETS,
-    CROWN,
-    EXPERIENCE_TOWERS,
-    INTRO_BILLBOARD,
-    PLAZA_Z,
-    PROJECT_TOWERS,
-    SKILL_SIGNS,
+    CPU,
+    INTRO_CHIP,
+    PROJECT_CHIPS,
+    RAM_STICKS,
+    SKILL_PARTS,
+    SLOT_Z,
     type Vec3,
 } from './journeyData';
 
-const NEON = { cyan: '#22d3ee', magenta: '#f472b6', violet: '#a78bfa', amber: '#fbbf24' };
+const NEON = { cyan: '#22d3ee', magenta: '#f472b6', violet: '#a78bfa', amber: '#fbbf24', green: '#34d399' };
 const NEON_LIST = [NEON.cyan, NEON.magenta, NEON.violet, NEON.amber];
 const DISPLAY = '"Space Grotesk", Inter, system-ui, sans-serif';
 const MONO = '"JetBrains Mono", ui-monospace, monospace';
-const WINDOW_UNITS = 16; // the window texture covers 16×16 world units
+const PART_NUMBERS = [
+    'AA-328P', 'MERN·X1', 'NODE-18', 'RCT-19', 'TS 5.9', 'MDB-7', 'EXP-4.2', 'VITE-5',
+    'JWT·256', 'API-GW', 'SQL-8.0', 'NXT-14', 'PHP-8.3', 'PY-3.12', 'AND-34', 'CDN-01',
+];
 
 const smooth = (t: number) => t * t * (3 - 2 * t);
 const v3 = (a: Vec3) => new THREE.Vector3(a[0], a[1], a[2]);
 
-/** Seeded random so the skyline is the same on every visit. */
+/** Seeded random so the board is the same on every visit. */
 function rng(seed: number) {
     return () => {
         seed = (seed * 16807) % 2147483647;
@@ -63,6 +66,19 @@ function wrapText(ctx: CanvasRenderingContext2D, text: string, x: number, y: num
 /** Bright, un-tonemapped colour so it blooms. */
 const glow = (hex: string, k = 2.2) => new THREE.MeshBasicMaterial({ color: new THREE.Color(hex).multiplyScalar(k), toneMapped: false });
 
+interface Path {
+    pts: THREE.Vector3[];
+    cum: number[]; // cumulative length at each point
+    len: number;
+}
+
+function makePath(points: [number, number][], y = 0.09): Path {
+    const pts = points.map(([x, z]) => new THREE.Vector3(x, y, z));
+    const cum = [0];
+    for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + pts[i].distanceTo(pts[i - 1]));
+    return { pts, cum, len: cum[cum.length - 1] };
+}
+
 export class JourneyScene {
     private canvas: HTMLCanvasElement;
     private renderer: THREE.WebGLRenderer;
@@ -78,10 +94,15 @@ export class JourneyScene {
     private pointer = new THREE.Vector2();
     private pointerSmooth = new THREE.Vector2();
     private onProgress?: (p: number) => void;
-    private traffic!: THREE.InstancedMesh;
-    private trafficData: { x: number; z: number; speed: number }[] = [];
-    private beacons!: THREE.PointsMaterial;
     private narrow = false;
+
+    private paths: Path[] = [];
+    private pulses!: THREE.InstancedMesh;
+    private pulseData: { path: number; s: number; speed: number }[] = [];
+    private leds!: THREE.PointsMaterial;
+    private beams: THREE.MeshBasicMaterial[] = [];
+    private cpuRing!: THREE.Mesh;
+
     private tmpA = new THREE.Vector3();
     private tmpB = new THREE.Vector3();
     private tmpLook = new THREE.Vector3();
@@ -98,14 +119,20 @@ export class JourneyScene {
         this.renderer.toneMappingExposure = 1.1;
         this.renderer.outputColorSpace = THREE.SRGBColorSpace;
 
-        this.camera = new THREE.PerspectiveCamera(58, 1, 0.1, 600);
-        this.fog = new THREE.FogExp2('#060914', 0.008);
+        this.camera = new THREE.PerspectiveCamera(58, 1, 0.1, 500);
+        this.fog = new THREE.FogExp2('#020708', 0.01);
         this.scene.fog = this.fog;
-        this.scene.background = new THREE.Color('#060914');
+        this.scene.background = new THREE.Color('#020708');
+
+        // soft studio reflections so the gold traces and pins read as metal
+        const pmrem = new THREE.PMREMGenerator(this.renderer);
+        this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+        this.scene.environmentIntensity = 0.35;
+        pmrem.dispose();
 
         this.composer = new EffectComposer(this.renderer);
         this.composer.addPass(new RenderPass(this.scene, this.camera));
-        this.bloom = new UnrealBloomPass(new THREE.Vector2(512, 512), 0.85, 0.55, 0.72);
+        this.bloom = new UnrealBloomPass(new THREE.Vector2(512, 512), 0.9, 0.5, 0.7);
         this.composer.addPass(this.bloom);
         this.composer.addPass(new OutputPass());
 
@@ -131,6 +158,7 @@ export class JourneyScene {
             if (Array.isArray(m)) m.forEach((x) => x.dispose());
             else m?.dispose();
         });
+        this.scene.environment?.dispose();
         this.composer.dispose();
         this.renderer.dispose();
     }
@@ -138,264 +166,323 @@ export class JourneyScene {
     /* ================================================================ build */
 
     private build() {
-        const loader = new THREE.TextureLoader();
         const s = this.scene;
+        s.add(new THREE.HemisphereLight('#7fffe0', '#020406', 0.45));
+        const key = new THREE.DirectionalLight('#bfe9ff', 0.9);
+        key.position.set(-20, 40, 30);
+        s.add(key);
 
-        s.add(new THREE.HemisphereLight('#5d6dff', '#05060c', 0.9));
-        const moon = new THREE.DirectionalLight('#8fa8ff', 0.5);
-        moon.position.set(-30, 60, 20);
-        s.add(moon);
-
-        this.buildGround();
-        this.buildSkyline(loader);
-        this.buildStreetLife();
-        this.buildSkillSigns();
-        this.buildStars();
+        const loader = new THREE.TextureLoader();
+        this.buildBoard();
+        this.buildComponents();
+        this.buildTraces();
+        this.buildFeatures(loader);
+        this.buildSkillParts();
+        this.buildPulses();
     }
 
-    /** Lit-window texture shared by every building. */
-    private windowTexture() {
-        const r = rng(7);
-        const tex = canvasTexture(512, 512, (ctx) => {
-            ctx.fillStyle = '#04060c';
-            ctx.fillRect(0, 0, 512, 512);
-            // two windows per world unit across, one floor per unit up
-            const cols = WINDOW_UNITS * 2;
-            const cw = 512 / cols;
-            const ch = 512 / WINDOW_UNITS;
-            const palette = ['#ffd27a', '#ffe7b0', '#9be7ff', '#e8f0ff', '#ffd27a', '#ff8ad8'];
-            for (let y = 0; y < WINDOW_UNITS; y++) {
-                // whole floors tend to be lit together, like real offices
-                const floorLit = r() < 0.25 ? 0.7 : 0.18;
-                for (let x = 0; x < cols; x++) {
-                    const lit = r() < floorLit;
-                    ctx.fillStyle = lit ? palette[Math.floor(r() * palette.length)] : '#111a30';
-                    ctx.globalAlpha = lit ? 0.5 + r() * 0.5 : 1;
-                    ctx.fillRect(x * cw + 3, y * ch + 9, cw - 6, ch - 16);
+    /** Solder-mask texture: fine dot grid, faint routed traces and pads. */
+    private buildBoard() {
+        const r = rng(5);
+        const tex = canvasTexture(1024, 1024, (ctx) => {
+            ctx.fillStyle = '#04100f';
+            ctx.fillRect(0, 0, 1024, 1024);
+            ctx.fillStyle = '#0a2220';
+            for (let y = 8; y < 1024; y += 16) for (let x = 8; x < 1024; x += 16) ctx.fillRect(x, y, 2, 2);
+            ctx.lineCap = 'round';
+            for (let i = 0; i < 70; i++) {
+                ctx.strokeStyle = r() < 0.15 ? '#1d5a50' : '#0f3a35';
+                ctx.lineWidth = r() < 0.2 ? 5 : 2.5;
+                let x = Math.round(r() * 64) * 16;
+                let y = Math.round(r() * 64) * 16;
+                ctx.beginPath();
+                ctx.moveTo(x, y);
+                for (let k = 0; k < 4; k++) {
+                    const len = (2 + Math.floor(r() * 10)) * 16;
+                    const dir = Math.floor(r() * 4);
+                    if (dir === 0) x += len;
+                    else if (dir === 1) y += len;
+                    else if (dir === 2) { x += len; y += len; }
+                    else { x -= len; y += len; }
+                    ctx.lineTo(x, y);
                 }
+                ctx.stroke();
+                ctx.fillStyle = '#1d5a50';
+                ctx.beginPath();
+                ctx.arc(x, y, 5, 0, Math.PI * 2);
+                ctx.fill();
             }
-            ctx.globalAlpha = 1;
         });
         tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-        return tex;
+        tex.repeat.set(27, 30);
+        const board = new THREE.Mesh(
+            new THREE.PlaneGeometry(900, 1000),
+            new THREE.MeshStandardMaterial({ map: tex, roughness: 0.55, metalness: 0.1, emissive: '#1affd5', emissiveMap: tex, emissiveIntensity: 0.4 }),
+        );
+        board.rotation.x = -Math.PI / 2;
+        board.position.set(0, 0, -150);
+        this.scene.add(board);
+
+        // the bus gets a slightly lighter channel so it reads as the main road
+        const channel = new THREE.Mesh(
+            new THREE.PlaneGeometry(BUS.half * 2 + 2, BUS.zStart - BUS.zEnd),
+            new THREE.MeshStandardMaterial({ color: '#06201d', roughness: 0.4, metalness: 0.3 }),
+        );
+        channel.rotation.x = -Math.PI / 2;
+        channel.position.set(0, 0.01, (BUS.zStart + BUS.zEnd) / 2);
+        this.scene.add(channel);
     }
 
-    /** A box whose UVs are in world units so windows tile evenly on any size. */
-    private buildingGeo(w: number, h: number, d: number, x: number, z: number, r: () => number) {
+    /** Label atlas for chip tops: 4×4 part numbers. */
+    private labelAtlas() {
+        return canvasTexture(1024, 1024, (ctx) => {
+            for (let i = 0; i < 16; i++) {
+                const x = (i % 4) * 256;
+                const y = Math.floor(i / 4) * 256;
+                const g = ctx.createLinearGradient(x, y, x + 256, y + 256);
+                g.addColorStop(0, '#15181f');
+                g.addColorStop(1, '#0b0d12');
+                ctx.fillStyle = g;
+                ctx.fillRect(x, y, 256, 256);
+                ctx.fillStyle = '#272c38';
+                ctx.beginPath();
+                ctx.arc(x + 34, y + 34, 12, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.fillStyle = '#9aa6b8';
+                ctx.font = `700 34px ${MONO}`;
+                ctx.fillText(PART_NUMBERS[i], x + 30, y + 140);
+                ctx.fillStyle = '#5c6678';
+                ctx.font = `500 20px ${MONO}`;
+                ctx.fillText(`2${4 + (i % 3)}${10 + i}  ·  AA`, x + 30, y + 180);
+            }
+        });
+    }
+
+    /** A chip body whose top face shows one cell of the label atlas. */
+    private chipGeo(w: number, h: number, d: number, x: number, z: number, cell: number) {
         const g = new THREE.BoxGeometry(w, h, d);
         const uv = g.attributes.uv as THREE.BufferAttribute;
-        const ou = Math.floor(r() * WINDOW_UNITS) / WINDOW_UNITS;
-        const ov = Math.floor(r() * WINDOW_UNITS) / WINDOW_UNITS;
-        for (let face = 0; face < 6; face++) {
-            for (let k = 0; k < 4; k++) {
-                const i = face * 4 + k;
-                if (face === 2 || face === 3) {
-                    uv.setXY(i, 0.001, 0.001); // roofs: dark gap colour
-                    continue;
-                }
-                const span = face < 2 ? d : w;
-                uv.setXY(i, uv.getX(i) * (span / WINDOW_UNITS) + ou, uv.getY(i) * (h / WINDOW_UNITS) + ov);
-            }
+        const cx = (cell % 4) / 4;
+        const cy = 1 - (Math.floor(cell / 4) + 1) / 4;
+        for (let i = 0; i < uv.count; i++) {
+            const face = Math.floor(i / 4);
+            if (face === 2) uv.setXY(i, cx + 0.01 + uv.getX(i) * 0.23, cy + 0.01 + uv.getY(i) * 0.23);
+            else uv.setXY(i, cx + 0.2, cy + 0.02); // sides: plain dark body
         }
-        g.translate(x, h / 2, z);
+        g.translate(x, h / 2 + 0.05, z);
         return g;
     }
 
-    private buildGround() {
-        const s = this.scene;
-        const ground = new THREE.Mesh(
-            new THREE.PlaneGeometry(500, 600),
-            new THREE.MeshStandardMaterial({ color: '#03050a', roughness: 0.95 }),
-        );
-        ground.rotation.x = -Math.PI / 2;
-        ground.position.set(0, -0.02, -120);
-        s.add(ground);
-
-        // wet-looking asphalt for the avenue and cross streets
-        const asphalt = new THREE.MeshStandardMaterial({ color: '#0a0e1c', roughness: 0.35, metalness: 0.6 });
-        const avenue = new THREE.Mesh(new THREE.PlaneGeometry(AVENUE_HALF * 2, 360), asphalt);
-        avenue.rotation.x = -Math.PI / 2;
-        avenue.position.set(0, 0, -110);
-        s.add(avenue);
-        CROSS_STREETS.forEach((z) => {
-            const st = new THREE.Mesh(new THREE.PlaneGeometry(400, 9), asphalt);
-            st.rotation.x = -Math.PI / 2;
-            st.position.set(0, 0.005, z);
-            s.add(st);
-        });
-
-        // lane dashes + glowing kerb lines
-        const dashes: THREE.BufferGeometry[] = [];
-        for (let z = 60; z > PLAZA_Z + 20; z -= 6) {
-            for (const x of [-3.3, 0, 3.3]) {
-                const g = new THREE.PlaneGeometry(x === 0 ? 0.14 : 0.08, 2.6);
-                g.rotateX(-Math.PI / 2);
-                g.translate(x, 0.02, z);
-                dashes.push(g);
-            }
-        }
-        s.add(new THREE.Mesh(mergeGeometries(dashes), new THREE.MeshBasicMaterial({ color: '#3a4670' })));
-        for (const side of [-1, 1]) {
-            const kerb = new THREE.Mesh(new THREE.PlaneGeometry(0.12, 300), glow(side < 0 ? NEON.cyan : NEON.magenta, 1.3));
-            kerb.rotation.x = -Math.PI / 2;
-            kerb.position.set(side * AVENUE_HALF, 0.03, -90);
-            s.add(kerb);
-        }
-
-        // plaza: a glowing grid
-        const grid = new THREE.GridHelper(70, 35, NEON.cyan, '#1b2a4a');
-        grid.position.set(0, 0.04, PLAZA_Z + 4);
-        (grid.material as THREE.Material).transparent = true;
-        (grid.material as THREE.Material).opacity = 0.5;
-        s.add(grid);
-    }
-
-    private buildSkyline(loader: THREE.TextureLoader) {
-        const s = this.scene;
+    /** Scattered ICs, capacitors, heatsinks and LEDs — the "skyline". */
+    private buildComponents() {
         const r = rng(42);
-        const geos: THREE.BufferGeometry[] = [];
-        const roofLines: number[] = [];
-        const roofColors: number[] = [];
-        const beaconPos: number[] = [];
+        const chips: THREE.BufferGeometry[] = [];
+        const pins: THREE.Matrix4[] = [];
+        const caps: THREE.BufferGeometry[] = [];
+        const capTops: THREE.BufferGeometry[] = [];
+        const fins: THREE.BufferGeometry[] = [];
+        const ledPos: number[] = [];
+        const ledCol: number[] = [];
         const c = new THREE.Color();
+        const m = new THREE.Matrix4();
+
+        const addPins = (x: number, z: number, w: number, d: number, fourSides: boolean) => {
+            const pitch = 0.55;
+            for (let px = -w / 2 + 0.4; px <= w / 2 - 0.4; px += pitch) {
+                for (const sz of [-1, 1]) pins.push(m.clone().makeTranslation(x + px, 0.12, z + sz * (d / 2 + 0.22)));
+            }
+            if (!fourSides) return;
+            for (let pz = -d / 2 + 0.4; pz <= d / 2 - 0.4; pz += pitch) {
+                for (const sx of [-1, 1]) {
+                    const t = new THREE.Matrix4().makeRotationY(Math.PI / 2);
+                    t.setPosition(x + sx * (w / 2 + 0.22), 0.12, z + pz);
+                    pins.push(t);
+                }
+            }
+        };
+        this.addChip = (x, z, w, d, h, cell, four = true) => {
+            chips.push(this.chipGeo(w, h, d, x, z, cell));
+            addPins(x, z, w, d, four);
+        };
 
         const reserved = (x: number, z: number) => {
-            if (Math.abs(x) < 16 && Math.abs(z - INTRO_BILLBOARD[2]) < 9 && x < 0) return true;
-            if (PROJECT_TOWERS.some((t) => Math.sign(x) === t.side && Math.abs(x) < 20 && Math.abs(z - t.z) < 11)) return true;
-            if (z < PLAZA_Z + 16 && Math.abs(x) < 36) return true;
-            if (z < CROWN.z + 14 && Math.abs(x) < 16) return true;
+            if (Math.abs(x - INTRO_CHIP.pos[0]) < 9 && Math.abs(z - INTRO_CHIP.pos[2]) < 9) return true;
+            if (PROJECT_CHIPS.some((p) => Math.abs(x - p.chip[0]) < 11 && Math.abs(z - p.z) < 11)) return true;
+            if (z < -142 && z > -212 && Math.abs(x) < 10) return true; // skill row
+            if (z < SLOT_Z + 12 && Math.abs(x) < 30) return true;
             return false;
         };
-        const nearStreet = (z: number) => CROSS_STREETS.some((cz) => Math.abs(z - cz) < 6);
 
-        const addRoof = (x: number, y: number, z: number, w: number, d: number, hex: string) => {
-            const pts = [
-                [x - w / 2, z - d / 2], [x + w / 2, z - d / 2],
-                [x + w / 2, z - d / 2], [x + w / 2, z + d / 2],
-                [x + w / 2, z + d / 2], [x - w / 2, z + d / 2],
-                [x - w / 2, z + d / 2], [x - w / 2, z - d / 2],
-            ];
-            c.set(hex).multiplyScalar(1.8);
-            pts.forEach(([px, pz]) => {
-                roofLines.push(px, y + 0.05, pz);
-                roofColors.push(c.r, c.g, c.b);
-            });
-        };
-
-        for (let k = 0; k < 8; k++) {
+        for (let k = 0; k < 13; k++) {
             for (const side of [-1, 1]) {
-                const lx = side * (12 + k * 10);
-                for (let z = 40; z > CITY_END_Z; z -= 10) {
-                    if (nearStreet(z) || reserved(lx, z)) continue;
-                    const w = 6 + r() * 2.6;
-                    const d = 6 + r() * 2.6;
-                    let h = 8 + r() * 20 + k * 3;
-                    if (r() < 0.12) h += 25 + r() * 30;
-                    const x = lx + (k === 0 ? side * (8.6 - w) / 2 : (r() - 0.5));
-                    geos.push(this.buildingGeo(w, h, d, x, z, r));
-                    if (r() < 0.35) addRoof(x, h, z, w, d, NEON_LIST[Math.floor(r() * 4)]);
-                    if (h > 40) beaconPos.push(x, h + 1.2, z);
+                const lx = side * (9.5 + k * 8.5);
+                for (let z = 80; z > BOARD_END_Z; z -= 8.5) {
+                    if (r() < 0.22 || reserved(lx, z)) continue;
+                    const x = lx + (r() - 0.5) * 1.5;
+                    const zz = z + (r() - 0.5) * 1.5;
+                    const kind = r();
+                    if (kind < 0.55) {
+                        const w = 2.6 + r() * 3.6;
+                        const d = 2.6 + r() * 3.6;
+                        this.addChip(x, zz, w, d, 0.45 + r() * 0.5, Math.floor(r() * 16), r() < 0.6);
+                    } else if (kind < 0.8) {
+                        // a little cluster of electrolytic capacitors
+                        const n = 1 + Math.floor(r() * 3);
+                        for (let i = 0; i < n; i++) {
+                            const rad = 0.5 + r() * 0.7;
+                            const h = 1.4 + r() * 2.8;
+                            const cx = x + (i - (n - 1) / 2) * (rad * 2.4);
+                            const g = new THREE.CylinderGeometry(rad, rad, h, 20);
+                            g.translate(cx, h / 2, zz);
+                            caps.push(g);
+                            const t = new THREE.CylinderGeometry(rad * 0.98, rad * 0.98, 0.04, 20);
+                            t.translate(cx, h + 0.02, zz);
+                            capTops.push(t);
+                        }
+                    } else if (kind < 0.9) {
+                        // heatsink: base plate + fins
+                        const w = 5 + r() * 2;
+                        const h = 2.5 + r() * 2;
+                        const base = new THREE.BoxGeometry(w, 0.3, w);
+                        base.translate(x, 0.15, zz);
+                        fins.push(base);
+                        for (let f = -w / 2 + 0.3; f < w / 2; f += 0.55) {
+                            const fin = new THREE.BoxGeometry(0.12, h, w);
+                            fin.translate(x + f, h / 2 + 0.3, zz);
+                            fins.push(fin);
+                        }
+                    } else {
+                        // SMD resistor row with status LEDs
+                        for (let i = 0; i < 4; i++) {
+                            const g = this.chipGeo(1.2, 0.35, 0.6, x + i * 1.5 - 2.2, zz, 3);
+                            chips.push(g);
+                            c.set(r() < 0.6 ? NEON.green : r() < 0.5 ? '#ff3355' : NEON.amber).multiplyScalar(2.5);
+                            ledPos.push(x + i * 1.5 - 2.2, 0.75, zz + 0.9);
+                            ledCol.push(c.r, c.g, c.b);
+                        }
+                    }
                 }
             }
         }
 
-        // hero buildings
-        const hero = (x: number, z: number, w: number, h: number, d: number, neon: string) => {
-            geos.push(this.buildingGeo(w, h, d, x, z, r));
-            addRoof(x, h, z, w, d, neon);
-            beaconPos.push(x, h + 1.5, z);
-        };
-        hero(-13.5, INTRO_BILLBOARD[2], 9, 40, 12, NEON.cyan);
-        PROJECT_TOWERS.forEach((t, i) => hero(t.center[0], t.z, 9, 34 + i * 6, 15, NEON_LIST[i % 4]));
-        EXPERIENCE_TOWERS.forEach((t) => hero(t.x, PLAZA_Z, 12, 34, 12, NEON.violet));
-        hero(0, CROWN.z, 18, CROWN.height, 16, NEON.magenta);
+        // feature chips get their bodies here too
+        this.addChip(INTRO_CHIP.pos[0], INTRO_CHIP.pos[2], INTRO_CHIP.size, INTRO_CHIP.size, 1, 1);
+        PROJECT_CHIPS.forEach((p, i) => this.addChip(p.chip[0], p.z, 12, 12, 1.1, [4, 10, 1][i % 3]));
+        SKILL_PARTS.forEach((sp, i) => this.addChip(sp.chip[0], sp.chip[2], 3.2, 2.4, 0.5, (i * 5) % 16, false));
 
-        const windows = this.windowTexture();
-        const city = new THREE.Mesh(
-            mergeGeometries(geos),
-            new THREE.MeshStandardMaterial({
-                color: '#1a2440',
-                roughness: 0.6,
-                metalness: 0.3,
-                emissive: '#ffffff',
-                emissiveMap: windows,
-                emissiveIntensity: 0.95,
-            }),
+        const s = this.scene;
+        s.add(new THREE.Mesh(mergeGeometries(chips), new THREE.MeshStandardMaterial({ map: this.labelAtlas(), roughness: 0.45, metalness: 0.2 })));
+
+        const pinMesh = new THREE.InstancedMesh(
+            new THREE.BoxGeometry(0.2, 0.14, 0.5),
+            new THREE.MeshStandardMaterial({ color: '#d9b45a', metalness: 1, roughness: 0.28 }),
+            pins.length,
         );
-        s.add(city);
+        pins.forEach((mat, i) => pinMesh.setMatrixAt(i, mat));
+        s.add(pinMesh);
 
-        const rg = new THREE.BufferGeometry();
-        rg.setAttribute('position', new THREE.Float32BufferAttribute(roofLines, 3));
-        rg.setAttribute('color', new THREE.Float32BufferAttribute(roofColors, 3));
-        s.add(new THREE.LineSegments(rg, new THREE.LineBasicMaterial({ vertexColors: true, toneMapped: false })));
+        if (caps.length) {
+            s.add(new THREE.Mesh(mergeGeometries(caps), new THREE.MeshStandardMaterial({ color: '#1b2536', metalness: 0.5, roughness: 0.35 })));
+            s.add(new THREE.Mesh(mergeGeometries(capTops), new THREE.MeshStandardMaterial({ color: '#c3cad6', metalness: 1, roughness: 0.25 })));
+        }
+        if (fins.length) s.add(new THREE.Mesh(mergeGeometries(fins), new THREE.MeshStandardMaterial({ color: '#8d97a8', metalness: 0.9, roughness: 0.35 })));
 
-        const bg = new THREE.BufferGeometry();
-        bg.setAttribute('position', new THREE.Float32BufferAttribute(beaconPos, 3));
-        this.beacons = new THREE.PointsMaterial({
-            color: new THREE.Color('#ff2b4a').multiplyScalar(2.5),
-            size: 0.9,
-            map: this.dotTexture(),
-            transparent: true,
-            depthWrite: false,
-            toneMapped: false,
-        });
-        s.add(new THREE.Points(bg, this.beacons));
-
-        // billboards
-        const intro = this.billboard(loader, '/profile.jpg', 8, 10.5, NEON.cyan);
-        intro.position.copy(v3(INTRO_BILLBOARD));
-        intro.rotation.y = Math.PI / 2;
-        s.add(intro);
-
-        PROJECT_TOWERS.forEach((t, i) => {
-            const b = this.billboard(loader, t.proj.image, 13, 9, NEON_LIST[i % 4]);
-            b.position.copy(v3(t.billboard));
-            b.rotation.y = -t.side * Math.PI / 2;
-            s.add(b);
-            const wash = new THREE.PointLight(NEON_LIST[i % 4], 60, 30, 1.6);
-            wash.position.set(t.billboard[0] * 0.4, 4, t.z);
-            s.add(wash);
-        });
-
-        EXPERIENCE_TOWERS.forEach((t, i) => {
-            const screen = new THREE.Mesh(
-                new THREE.PlaneGeometry(9, 12),
-                new THREE.MeshBasicMaterial({ map: this.experienceTexture(t.exp, i), toneMapped: false }),
-            );
-            screen.position.copy(v3(t.screen));
-            s.add(screen);
-            this.neonFrame(screen, 9, 12, NEON.violet);
-            const wash = new THREE.PointLight(NEON.violet, 40, 26, 1.6);
-            wash.position.set(t.x, 3, PLAZA_Z + 12);
-            s.add(wash);
-        });
-
-        const crown = this.billboard(loader, '/profile.jpg', 12, 15, NEON.magenta);
-        crown.position.copy(v3(CROWN.billboard));
-        s.add(crown);
-        const crownWash = new THREE.PointLight(NEON.magenta, 120, 60, 1.4);
-        crownWash.position.set(0, 40, CROWN.z + 20);
-        s.add(crownWash);
+        const lg = new THREE.BufferGeometry();
+        lg.setAttribute('position', new THREE.Float32BufferAttribute(ledPos, 3));
+        lg.setAttribute('color', new THREE.Float32BufferAttribute(ledCol, 3));
+        this.leds = new THREE.PointsMaterial({ size: 0.9, vertexColors: true, map: this.dotTexture(), transparent: true, depthWrite: false, toneMapped: false });
+        s.add(new THREE.Points(lg, this.leds));
     }
 
-    /** Thin glowing border boxes around a plane (added as children). */
+    private addChip: (x: number, z: number, w: number, d: number, h: number, cell: number, four?: boolean) => void = () => {};
+
+    /** Gold traces: the main bus plus branches to every feature chip. */
+    private buildTraces() {
+        const lane = (i: number) => -BUS.half + (i * (BUS.half * 2)) / (BUS.lanes - 1);
+        for (let i = 0; i < BUS.lanes; i++) this.paths.push(makePath([[lane(i), BUS.zStart], [lane(i), BUS.zEnd]]));
+
+        // 45° branch from the outer lane to a target point
+        const branch = (side: number, zFrom: number, tx: number, tz: number, offset = 0) => {
+            const x0 = side * (BUS.half - offset);
+            const d = Math.abs(tx - x0) * 0.45;
+            this.paths.push(makePath([[x0, zFrom], [x0 + side * d, zFrom - d], [tx, zFrom - d], [tx, tz]]));
+        };
+        branch(-1, INTRO_CHIP.pos[2] + 10, INTRO_CHIP.pos[0] + 4.5, INTRO_CHIP.pos[2]);
+        branch(-1, INTRO_CHIP.pos[2] + 12, INTRO_CHIP.pos[0] + 4.5, INTRO_CHIP.pos[2] + 2, 1);
+        PROJECT_CHIPS.forEach((p) => {
+            for (let k = 0; k < 3; k++) branch(p.side, p.z + 12 + k * 1.3, p.chip[0] - p.side * 6, p.z + 2 - k * 2, k * 1.03);
+        });
+        SKILL_PARTS.forEach((sp) => this.paths.push(makePath([[sp.side * BUS.half, sp.chip[2] + 1.6], [sp.side * 5.2, sp.chip[2]], [sp.chip[0], sp.chip[2]]])));
+        RAM_STICKS.forEach((st) => {
+            for (const off of [-3, 0, 3]) {
+                this.paths.push(makePath([[off * 0.6, BUS.zEnd + 30], [st.x + off, SLOT_Z + 10], [st.x + off, SLOT_Z + 0.5]]));
+            }
+        });
+        // the bus terminates in the CPU
+        for (let i = 0; i < BUS.lanes; i++) this.paths.push(makePath([[lane(i), SLOT_Z + 20], [lane(i) * 1.6, CPU.z + CPU.size / 2 + 2], [lane(i) * 1.6, CPU.z + CPU.size / 2]]));
+
+        // decorative background traces, so the whole board feels wired
+        const r = rng(99);
+        for (let i = 0; i < 60; i++) {
+            const side = r() < 0.5 ? -1 : 1;
+            const x = side * (12 + r() * 60);
+            const z = 40 - r() * 320;
+            const len = 6 + r() * 18;
+            const dz = (r() < 0.5 ? -1 : 1) * len;
+            this.paths.push(makePath([[x, z], [x, z + dz * 0.5], [x + side * len * 0.4, z + dz * 0.5 + len * 0.4 * Math.sign(dz)], [x + side * len * 0.4, z + dz]]));
+        }
+
+        const segs: THREE.BufferGeometry[] = [];
+        const vias: THREE.BufferGeometry[] = [];
+        this.paths.forEach((p) => {
+            for (let i = 1; i < p.pts.length; i++) {
+                const a = p.pts[i - 1];
+                const b = p.pts[i];
+                const len = a.distanceTo(b);
+                if (len < 0.01) continue;
+                const g = new THREE.BoxGeometry(0.2, 0.05, len + 0.2);
+                g.rotateY(Math.atan2(b.x - a.x, b.z - a.z));
+                g.translate((a.x + b.x) / 2, 0.04, (a.z + b.z) / 2);
+                segs.push(g);
+            }
+            for (const end of [p.pts[0], p.pts[p.pts.length - 1]]) {
+                const v = new THREE.CylinderGeometry(0.32, 0.32, 0.06, 14);
+                v.translate(end.x, 0.05, end.z);
+                vias.push(v);
+            }
+        });
+        const gold = new THREE.MeshStandardMaterial({ color: '#c99a3c', metalness: 1, roughness: 0.3, emissive: '#3a2400', emissiveIntensity: 0.6 });
+        this.scene.add(new THREE.Mesh(mergeGeometries(segs), gold));
+        this.scene.add(new THREE.Mesh(mergeGeometries(vias), gold));
+    }
+
+    /** Data pulses travelling along the traces. */
+    private buildPulses() {
+        const r = rng(17);
+        const count = 320;
+        this.pulses = new THREE.InstancedMesh(new THREE.BoxGeometry(0.26, 0.12, 1.1), new THREE.MeshBasicMaterial({ toneMapped: false }), count);
+        const busCount = BUS.lanes;
+        for (let i = 0; i < count; i++) {
+            // half of all pulses run on the main bus so the "road" is always alive
+            const path = i < count * 0.5 ? i % busCount : busCount + Math.floor(r() * (this.paths.length - busCount));
+            const p = this.paths[path];
+            this.pulseData.push({ path, s: r() * p.len, speed: 6 + r() * 10 });
+            const hex = r() < 0.6 ? NEON.cyan : r() < 0.5 ? NEON.magenta : NEON.amber;
+            this.pulses.setColorAt(i, new THREE.Color(hex).multiplyScalar(2.6));
+        }
+        this.scene.add(this.pulses);
+    }
+
+    /** Thin glowing border boxes around a plane (added as children). Returns a relayout fn. */
     private neonFrame(parent: THREE.Object3D, w: number, h: number, hex: string) {
         const mat = glow(hex);
-        const t = 0.16;
-        const parts: [number, number, number, number][] = [
-            [w + t * 2, t, 0, h / 2 + t / 2],
-            [w + t * 2, t, 0, -h / 2 - t / 2],
-            [t, h, -w / 2 - t / 2, 0],
-            [t, h, w / 2 + t / 2, 0],
-        ];
-        const meshes = parts.map(([sw, sh, x, y]) => {
-            const m = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 0.12), mat);
-            m.scale.set(sw, sh, 1);
-            m.position.set(x, y, 0.02);
+        const t = 0.12;
+        const meshes = [0, 1, 2, 3].map(() => {
+            const m = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 0.08), mat);
             parent.add(m);
             return m;
         });
-        return (nw: number, nh: number) => {
+        const layout = (nw: number, nh: number) => {
             meshes[0].scale.set(nw + t * 2, t, 1);
             meshes[0].position.set(0, nh / 2 + t / 2, 0.02);
             meshes[1].scale.set(nw + t * 2, t, 1);
@@ -405,18 +492,47 @@ export class JourneyScene {
             meshes[3].scale.set(t, nh, 1);
             meshes[3].position.set(nw / 2 + t / 2, 0, 0.02);
         };
+        layout(w, h);
+        return layout;
     }
 
-    /** Image screen with neon frame; resizes to the image's aspect once loaded. */
-    private billboard(loader: THREE.TextureLoader, url: string, maxW: number, maxH: number, hex: string) {
+    /** Floating holographic screen with a light beam down to its chip. */
+    private hologram(loader: THREE.TextureLoader, url: string, maxW: number, maxH: number, hex: string, beamHeight: number) {
         const group = new THREE.Group();
-        const mat = new THREE.MeshBasicMaterial({ color: '#1a2140', toneMapped: false });
+        const mat = new THREE.MeshBasicMaterial({ color: '#16303a', toneMapped: false, transparent: true, opacity: 0.95, side: THREE.DoubleSide });
         const plane = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), mat);
         group.add(plane);
-        const back = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 0.3), new THREE.MeshStandardMaterial({ color: '#05070d' }));
-        back.position.z = -0.2;
-        group.add(back);
         const relayout = this.neonFrame(group, maxW, maxH, hex);
+
+        // scanline overlay
+        const scan = canvasTexture(4, 256, (ctx) => {
+            for (let y = 0; y < 256; y += 4) {
+                ctx.fillStyle = 'rgba(255,255,255,0.10)';
+                ctx.fillRect(0, y, 4, 1);
+            }
+        });
+        scan.wrapT = THREE.RepeatWrapping;
+        scan.repeat.set(1, 3);
+        const scanMesh = new THREE.Mesh(
+            new THREE.PlaneGeometry(1, 1),
+            new THREE.MeshBasicMaterial({ map: scan, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false }),
+        );
+        scanMesh.position.z = 0.01;
+        group.add(scanMesh);
+
+        // light beam from the chip below
+        const beamMat = new THREE.MeshBasicMaterial({
+            color: new THREE.Color(hex).multiplyScalar(1.2),
+            transparent: true,
+            opacity: 0.12,
+            side: THREE.DoubleSide,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending,
+            toneMapped: false,
+        });
+        this.beams.push(beamMat);
+        const beam = new THREE.Mesh(new THREE.CylinderGeometry(1, 0.15, 1, 4, 1, true), beamMat);
+        group.add(beam);
 
         const layout = (aspect: number) => {
             let w = maxW;
@@ -426,15 +542,18 @@ export class JourneyScene {
                 w = h * aspect;
             }
             plane.scale.set(w, h, 1);
-            back.scale.set(w + 0.6, h + 0.6, 1);
+            scanMesh.scale.set(w, h, 1);
             relayout(w, h);
+            beam.scale.set(w * 0.5, beamHeight - h / 2, w * 0.2);
+            beam.position.set(0, -h / 2 - (beamHeight - h / 2) / 2, -0.2);
+            beam.rotation.y = Math.PI / 4;
         };
         layout(maxW / maxH);
         loader.load(url, (tex) => {
             tex.colorSpace = THREE.SRGBColorSpace;
             tex.anisotropy = 8;
             mat.map = tex;
-            mat.color.set('#c8c8c8');
+            mat.color.set('#d4dde6');
             mat.needsUpdate = true;
             const img = tex.image as HTMLImageElement;
             layout(img.width / img.height);
@@ -442,81 +561,184 @@ export class JourneyScene {
         return group;
     }
 
-    private experienceTexture(exp: (typeof EXPERIENCE_TOWERS)[number]['exp'], i: number) {
-        return canvasTexture(600, 800, (ctx) => {
-            const g = ctx.createLinearGradient(0, 0, 0, 800);
-            g.addColorStop(0, '#120c2a');
-            g.addColorStop(1, '#070815');
-            ctx.fillStyle = g;
-            ctx.fillRect(0, 0, 600, 800);
-            ctx.strokeStyle = 'rgba(167,139,250,0.25)';
-            for (let y = 0; y < 800; y += 4) {
-                ctx.beginPath();
-                ctx.moveTo(0, y);
-                ctx.lineTo(600, y);
-                ctx.stroke();
+    private buildFeatures(loader: THREE.TextureLoader) {
+        const s = this.scene;
+
+        // intro portrait
+        const intro = this.hologram(loader, '/profile.jpg', 7, 9, NEON.cyan, INTRO_CHIP.holo[1]);
+        intro.position.copy(v3(INTRO_CHIP.holo));
+        intro.rotation.y = INTRO_CHIP.rotY;
+        s.add(intro);
+        const il = new THREE.PointLight(NEON.cyan, 40, 22, 1.6);
+        il.position.set(INTRO_CHIP.pos[0] + 3, 2, INTRO_CHIP.pos[2] + 4);
+        s.add(il);
+
+        // project chips
+        PROJECT_CHIPS.forEach((p, i) => {
+            const hex = NEON_LIST[i % 4];
+            const holo = this.hologram(loader, p.proj.image, 12, 7.6, hex, p.holo[1]);
+            holo.position.copy(v3(p.holo));
+            holo.rotation.y = p.rotY;
+            s.add(holo);
+            const l = new THREE.PointLight(hex, 70, 28, 1.5);
+            l.position.set(p.chip[0] - p.side * 4, 3, p.z + 5);
+            s.add(l);
+            // glowing outline around the chip footprint
+            const ring = new THREE.Mesh(new THREE.RingGeometry(9.2, 9.45, 4, 1), glow(hex, 1.6));
+            ring.rotation.x = -Math.PI / 2;
+            ring.rotation.z = Math.PI / 4;
+            ring.position.set(p.chip[0], 0.06, p.z);
+            s.add(ring);
+        });
+
+        // RAM sticks
+        RAM_STICKS.forEach((st, i) => {
+            const slot = new THREE.Mesh(new THREE.BoxGeometry(12.4, 0.9, 1.1), new THREE.MeshStandardMaterial({ color: '#111722', roughness: 0.6 }));
+            slot.position.set(st.x, 0.45, SLOT_Z);
+            s.add(slot);
+            for (const sx of [-1, 1]) {
+                const latch = new THREE.Mesh(new THREE.BoxGeometry(0.4, 2.2, 1.1), new THREE.MeshStandardMaterial({ color: '#e7e9ee', roughness: 0.5 }));
+                latch.position.set(st.x + sx * 6.3, 1.1, SLOT_Z);
+                s.add(latch);
             }
-            ctx.fillStyle = NEON.violet;
-            ctx.font = `500 22px ${MONO}`;
-            ctx.fillText(`// ROLE ${String(i + 1).padStart(2, '0')}`, 44, 70);
-            ctx.fillStyle = '#9be7ff';
-            ctx.fillText(exp.period.toUpperCase(), 44, 110);
-            ctx.fillStyle = '#ffffff';
-            ctx.shadowColor = NEON.violet;
-            ctx.shadowBlur = 18;
-            ctx.font = `700 64px ${DISPLAY}`;
-            let y = wrapText(ctx, exp.company, 44, 210, 512, 68);
-            ctx.shadowBlur = 0;
-            ctx.fillStyle = NEON.magenta;
-            ctx.font = `500 30px ${DISPLAY}`;
-            y = wrapText(ctx, exp.role, 44, y + 70, 512, 38);
-            ctx.fillStyle = 'rgba(232,240,255,0.75)';
-            ctx.font = `400 24px ${DISPLAY}`;
-            wrapText(ctx, exp.description, 44, y + 70, 512, 34);
-            ctx.fillStyle = NEON.cyan;
-            ctx.font = `500 19px ${MONO}`;
-            wrapText(ctx, exp.tech.join(' · '), 44, 720, 512, 28);
+            const stick = new THREE.Mesh(
+                new THREE.BoxGeometry(11.6, 7.4, 0.22),
+                [
+                    new THREE.MeshStandardMaterial({ color: '#0c2a22' }),
+                    new THREE.MeshStandardMaterial({ color: '#0c2a22' }),
+                    new THREE.MeshStandardMaterial({ color: '#0c2a22' }),
+                    new THREE.MeshStandardMaterial({ color: '#0c2a22' }),
+                    new THREE.MeshBasicMaterial({ map: this.ramTexture(st.exp, i), toneMapped: false }),
+                    new THREE.MeshStandardMaterial({ color: '#0c2a22' }),
+                ],
+            );
+            stick.position.set(st.x, 4.6, SLOT_Z);
+            s.add(stick);
+            const l = new THREE.PointLight(NEON.violet, 30, 20, 1.6);
+            l.position.set(st.x, 6, SLOT_Z + 7);
+            s.add(l);
+        });
+
+        // CPU: substrate, heat spreader, glowing core ring and the portrait hologram
+        const sub = new THREE.Mesh(new THREE.BoxGeometry(CPU.size, 0.6, CPU.size), new THREE.MeshStandardMaterial({ color: '#0e3b2c', roughness: 0.5 }));
+        sub.position.set(0, 0.3, CPU.z);
+        s.add(sub);
+        const ihs = new THREE.Mesh(
+            new THREE.BoxGeometry(CPU.size * 0.72, 0.7, CPU.size * 0.72),
+            new THREE.MeshStandardMaterial({ color: '#c7ccd4', metalness: 1, roughness: 0.22 }),
+        );
+        ihs.position.set(0, 0.95, CPU.z);
+        s.add(ihs);
+        const engraving = new THREE.Mesh(
+            new THREE.PlaneGeometry(CPU.size * 0.6, CPU.size * 0.3),
+            new THREE.MeshBasicMaterial({ map: this.cpuEngraving(), transparent: true, toneMapped: false }),
+        );
+        engraving.rotation.x = -Math.PI / 2;
+        engraving.position.set(0, 1.31, CPU.z + 2.5);
+        s.add(engraving);
+        this.cpuRing = new THREE.Mesh(new THREE.TorusGeometry(CPU.size * 0.6, 0.08, 8, 120), glow(NEON.magenta, 2.4));
+        this.cpuRing.rotation.x = Math.PI / 2;
+        this.cpuRing.position.set(0, 0.4, CPU.z);
+        s.add(this.cpuRing);
+        const portrait = this.hologram(loader, '/profile.jpg', 10, 12.5, NEON.magenta, CPU.holo[1]);
+        portrait.position.copy(v3(CPU.holo));
+        s.add(portrait);
+        const cl = new THREE.PointLight(NEON.magenta, 120, 40, 1.4);
+        cl.position.set(0, 8, CPU.z + 12);
+        s.add(cl);
+    }
+
+    private cpuEngraving() {
+        return canvasTexture(1024, 512, (ctx) => {
+            ctx.fillStyle = 'rgba(40,46,58,0.85)';
+            ctx.font = `700 120px ${DISPLAY}`;
+            ctx.fillText('AA·CORE', 60, 190);
+            ctx.font = `500 44px ${MONO}`;
+            ctx.fillText('MERN STACK · 3+ YRS', 64, 290);
+            ctx.fillText('TRIPOLI · LEBANON', 64, 360);
         });
     }
 
-    private buildSkillSigns() {
-        SKILL_SIGNS.forEach((sign, i) => {
+    private ramTexture(exp: (typeof RAM_STICKS)[number]['exp'], i: number) {
+        return canvasTexture(1160, 740, (ctx) => {
+            ctx.fillStyle = '#0b2b23';
+            ctx.fillRect(0, 0, 1160, 740);
+            // gold edge contacts
+            for (let x = 30; x < 1130; x += 18) {
+                if (x > 560 && x < 600) continue; // the notch
+                ctx.fillStyle = '#d9b45a';
+                ctx.fillRect(x, 680, 11, 56);
+            }
+            // memory chips along the bottom
+            for (let k = 0; k < 8; k++) {
+                ctx.fillStyle = '#12151c';
+                ctx.fillRect(40 + k * 138, 540, 118, 112);
+                ctx.fillStyle = '#4a5466';
+                ctx.font = `500 16px ${MONO}`;
+                ctx.fillText(`D${k}·16Gb`, 52 + k * 138, 604);
+            }
+            // label sticker with the experience
+            ctx.fillStyle = 'rgba(6,10,20,0.92)';
+            ctx.fillRect(40, 36, 1080, 476);
+            ctx.strokeStyle = NEON.violet;
+            ctx.lineWidth = 4;
+            ctx.strokeRect(40, 36, 1080, 476);
+            ctx.fillStyle = NEON.violet;
+            ctx.font = `500 26px ${MONO}`;
+            ctx.fillText(`// MODULE ${String(i + 1).padStart(2, '0')}   ${exp.period.toUpperCase()}`, 80, 96);
+            ctx.fillStyle = '#ffffff';
+            ctx.shadowColor = NEON.violet;
+            ctx.shadowBlur = 18;
+            ctx.font = `700 76px ${DISPLAY}`;
+            let y = wrapText(ctx, exp.company, 80, 196, 1000, 80);
+            ctx.shadowBlur = 0;
+            ctx.fillStyle = NEON.magenta;
+            ctx.font = `500 34px ${DISPLAY}`;
+            y = wrapText(ctx, exp.role, 80, y + 60, 1000, 40);
+            ctx.fillStyle = 'rgba(232,240,255,0.78)';
+            ctx.font = `400 27px ${DISPLAY}`;
+            y = wrapText(ctx, exp.description, 80, y + 52, 1000, 36);
+            ctx.fillStyle = NEON.cyan;
+            ctx.font = `500 22px ${MONO}`;
+            ctx.fillText(exp.tech.join(' · '), 80, Math.min(y + 56, 488));
+        });
+    }
+
+    private buildSkillParts() {
+        SKILL_PARTS.forEach((sp, i) => {
             const hex = NEON_LIST[i % 4];
             const tex = canvasTexture(640, 200, (ctx) => {
-                ctx.fillStyle = 'rgba(6,8,18,0.92)';
+                ctx.fillStyle = 'rgba(4,10,14,0.9)';
                 ctx.beginPath();
-                ctx.roundRect(10, 10, 620, 180, 22);
+                ctx.roundRect(10, 10, 620, 180, 16);
                 ctx.fill();
                 ctx.shadowColor = hex;
                 ctx.shadowBlur = 22;
                 ctx.strokeStyle = hex;
-                ctx.lineWidth = 6;
+                ctx.lineWidth = 5;
                 ctx.stroke();
                 ctx.fillStyle = '#ffffff';
-                ctx.font = `700 76px ${DISPLAY}`;
-                ctx.fillText(sign.skill.name, 40, 112);
+                ctx.font = `700 74px ${DISPLAY}`;
+                ctx.fillText(sp.skill.name, 40, 110);
                 ctx.shadowBlur = 0;
                 ctx.fillStyle = hex;
                 ctx.font = `500 22px ${MONO}`;
-                ctx.fillText(`${sign.skill.category.toUpperCase()}  ${sign.skill.level}%`, 42, 162);
+                ctx.fillText(`${sp.skill.category.toUpperCase()}  ${sp.skill.level}%`, 42, 160);
                 ctx.fillStyle = 'rgba(255,255,255,0.15)';
-                ctx.fillRect(340, 152, 250, 8);
+                ctx.fillRect(340, 150, 250, 8);
                 ctx.fillStyle = hex;
-                ctx.fillRect(340, 152, 250 * (sign.skill.level / 100), 8);
+                ctx.fillRect(340, 150, 250 * (sp.skill.level / 100), 8);
             });
             const plane = new THREE.Mesh(
-                new THREE.PlaneGeometry(4.6, 1.44),
+                new THREE.PlaneGeometry(3.8, 1.19),
                 new THREE.MeshBasicMaterial({ map: tex, transparent: true, toneMapped: false, side: THREE.DoubleSide }),
             );
-            plane.position.copy(v3(sign.pos));
+            plane.position.copy(v3(sp.label));
             this.scene.add(plane);
-            // bracket back to the facade
-            const arm = new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.08, 0.08), new THREE.MeshStandardMaterial({ color: '#2a2f45', metalness: 0.8 }));
-            arm.position.set(sign.side * 8.3, sign.pos[1] + 0.8, sign.pos[2]);
-            this.scene.add(arm);
-            const l = new THREE.PointLight(hex, 10, 9, 2);
-            l.position.set(sign.pos[0], sign.pos[1], sign.pos[2] + 1);
-            this.scene.add(l);
+            // a thin light-pipe from the component up to its label
+            const stalk = new THREE.Mesh(new THREE.BoxGeometry(0.05, sp.label[1] - 0.6, 0.05), glow(hex, 1.4));
+            stalk.position.set(sp.chip[0], (sp.label[1] - 0.6) / 2 + 0.5, sp.chip[2]);
+            this.scene.add(stalk);
         });
     }
 
@@ -531,63 +753,6 @@ export class JourneyScene {
         });
         tex.colorSpace = THREE.NoColorSpace;
         return tex;
-    }
-
-    private buildStreetLife() {
-        const s = this.scene;
-        const r = rng(3);
-
-        // street lamps
-        const lamps: number[] = [];
-        for (let z = 50; z > PLAZA_Z + 14; z -= 9) for (const side of [-1, 1]) lamps.push(side * 6.6, 6, z);
-        const lg = new THREE.BufferGeometry();
-        lg.setAttribute('position', new THREE.Float32BufferAttribute(lamps, 3));
-        s.add(
-            new THREE.Points(
-                lg,
-                new THREE.PointsMaterial({
-                    color: new THREE.Color('#ffb36b').multiplyScalar(2),
-                    size: 1.1,
-                    map: this.dotTexture(),
-                    transparent: true,
-                    depthWrite: false,
-                    toneMapped: false,
-                }),
-            ),
-        );
-        const poles: THREE.BufferGeometry[] = [];
-        for (let i = 0; i < lamps.length; i += 3) {
-            const g = new THREE.CylinderGeometry(0.05, 0.07, 6, 6);
-            g.translate(lamps[i] + Math.sign(lamps[i]) * 0.3, 3, lamps[i + 2]);
-            poles.push(g);
-        }
-        s.add(new THREE.Mesh(mergeGeometries(poles), new THREE.MeshStandardMaterial({ color: '#1c2236', metalness: 0.7, roughness: 0.4 })));
-
-        // traffic: headlights come toward you, tail-lights drive away
-        const count = 140;
-        this.traffic = new THREE.InstancedMesh(new THREE.BoxGeometry(0.5, 0.22, 1.4), new THREE.MeshBasicMaterial({ toneMapped: false }), count);
-        const white = new THREE.Color('#dfefff').multiplyScalar(2.2);
-        const red = new THREE.Color('#ff2d55').multiplyScalar(2.2);
-        for (let i = 0; i < count; i++) {
-            const lane = [-4.8, -1.7, 1.7, 4.8][i % 4];
-            const toward = lane < 0;
-            this.trafficData.push({ x: lane, z: 50 - r() * 290, speed: (toward ? 1 : -1) * (9 + r() * 7) });
-            this.traffic.setColorAt(i, toward ? white : red);
-        }
-        s.add(this.traffic);
-    }
-
-    private buildStars() {
-        const r = rng(11);
-        const pos: number[] = [];
-        for (let i = 0; i < 1400; i++) {
-            const a = r() * Math.PI * 2;
-            const rad = 150 + r() * 220;
-            pos.push(Math.cos(a) * rad, 70 + r() * 160, -120 + Math.sin(a) * rad);
-        }
-        const g = new THREE.BufferGeometry();
-        g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-        this.scene.add(new THREE.Points(g, new THREE.PointsMaterial({ color: '#c9d6ff', size: 0.7, fog: false, transparent: true, opacity: 0.8 })));
     }
 
     /* ================================================================ runtime */
@@ -619,17 +784,16 @@ export class JourneyScene {
         const pos = this.tmpA.set(...a.pos).lerp(this.tmpB.set(...b.pos), t);
         const look = this.tmpLook.set(...a.look).lerp(this.tmpB.set(...b.look), t);
 
-        // on tall/narrow screens pull the camera back so screens still fit, but stay in the street
+        // on tall/narrow screens pull the camera back so screens still fit, but stay over the bus
         if (this.narrow) {
             const k = Math.min(1.7, 1 + (1 - this.camera.aspect) * 1.2);
             pos.sub(look).multiplyScalar(k).add(look);
-            if (pos.y < 30) pos.x = THREE.MathUtils.clamp(pos.x, -5.5, 5.5);
-            if (pos.z < PLAZA_Z + 8) pos.z = PLAZA_Z + 8;
+            if (pos.y < 20 && pos.z > SLOT_Z + 20) pos.x = THREE.MathUtils.clamp(pos.x, -5, 5);
         }
 
         this.camera.position.copy(pos);
-        this.camera.position.x += this.pointerSmooth.x * 0.5;
-        this.camera.position.y -= this.pointerSmooth.y * 0.3;
+        this.camera.position.x += this.pointerSmooth.x * 0.4;
+        this.camera.position.y -= this.pointerSmooth.y * 0.25;
         this.camera.up.set(0, 1, 0);
         this.camera.lookAt(look);
         this.camera.rotateZ(THREE.MathUtils.lerp(a.roll ?? 0, b.roll ?? 0, t));
@@ -638,6 +802,22 @@ export class JourneyScene {
         this.fog.color.copy(this.colA);
         (this.scene.background as THREE.Color).copy(this.colA);
         this.fog.density = THREE.MathUtils.lerp(a.density, b.density, t);
+    }
+
+    private placePulse(i: number, dt: number) {
+        const d = this.pulseData[i];
+        const p = this.paths[d.path];
+        d.s = (d.s + d.speed * dt) % p.len;
+        let k = 1;
+        while (k < p.cum.length - 1 && p.cum[k] < d.s) k++;
+        const a = p.pts[k - 1];
+        const b = p.pts[k];
+        const seg = p.cum[k] - p.cum[k - 1] || 1;
+        const t = (d.s - p.cum[k - 1]) / seg;
+        this.dummy.position.set(a.x + (b.x - a.x) * t, 0.12, a.z + (b.z - a.z) * t);
+        this.dummy.rotation.set(0, Math.atan2(b.x - a.x, b.z - a.z), 0);
+        this.dummy.updateMatrix();
+        this.pulses.setMatrixAt(i, this.dummy.matrix);
     }
 
     private loop = () => {
@@ -651,16 +831,13 @@ export class JourneyScene {
         this.pointerSmooth.lerp(this.pointer, 1 - Math.exp(-dt * 3));
         this.applyCamera(this.progress);
 
-        this.trafficData.forEach((car, i) => {
-            car.z += car.speed * dt;
-            if (car.z > 55) car.z = -240;
-            if (car.z < -240) car.z = 55;
-            this.dummy.position.set(car.x, 0.35, car.z);
-            this.dummy.updateMatrix();
-            this.traffic.setMatrixAt(i, this.dummy.matrix);
-        });
-        this.traffic.instanceMatrix.needsUpdate = true;
-        this.beacons.opacity = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(elapsed * 2.4));
+        for (let i = 0; i < this.pulseData.length; i++) this.placePulse(i, dt);
+        this.pulses.instanceMatrix.needsUpdate = true;
+
+        this.leds.opacity = 0.55 + 0.45 * Math.sin(elapsed * 3.1);
+        const flicker = 0.1 + 0.04 * Math.sin(elapsed * 7) + 0.02 * Math.sin(elapsed * 23);
+        this.beams.forEach((m) => (m.opacity = flicker));
+        this.cpuRing.scale.setScalar(1 + 0.03 * Math.sin(elapsed * 2));
 
         this.composer.render();
         this.onProgress?.(this.progress);

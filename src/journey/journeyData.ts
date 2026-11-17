@@ -35,96 +35,97 @@ export interface ChapterGroup {
     end: number;
 }
 
-/* ---------------------------------------------------------------- city layout
- * The city is a grid. A main avenue runs down the -z axis at x = 0.
- * Cross streets cut across every 40 units, at z = -20, -60, -100 …
+/* ---------------------------------------------------------------- board layout
+ * A circuit board seen from a drone. The main data bus — a bundle of gold
+ * traces — runs down the -z axis at x = 0. Everything branches off it.
  */
 
-export const AVENUE_HALF = 7; // building facades start beyond this
-export const CROSS_STREETS = [20, -20, -60, -100, -140, -180, -220];
-export const CITY_END_Z = -290;
+export const BUS = { half: 3.6, lanes: 8, zStart: 60, zEnd: -262 };
+export const BOARD_END_Z = -360;
 
-/** Project towers: big screenshot billboards facing the avenue. */
-export const PROJECT_TOWERS = projects.map((proj, i) => {
+/** The first chip: your portrait as a hologram. */
+export const INTRO_CHIP = { pos: [-15, 0, -6] as Vec3, size: 9, holo: [-14, 7.5, -6] as Vec3, rotY: 0.75 };
+
+/** Project chips: big ICs with a holographic screenshot floating above. */
+export const PROJECT_CHIPS = projects.map((proj, i) => {
     const side = i % 2 === 0 ? -1 : 1;
-    const z = -40 - i * 40;
-    const billboard: Vec3 = [side * 8.6, 12, z];
-    const view: Vec3 = [-side * 3.2, 10.5, z + 13];
-    const drift: Vec3 = [-side * 2.4, 11.2, z + 10];
-    return { proj, side, z, center: [side * 13.5, 0, z] as Vec3, billboard, view, drift };
+    const z = -42 - i * 40;
+    const rotY = -side * 0.85;
+    const holo: Vec3 = [side * 13.5, 7.8, z];
+    const n: Vec3 = [Math.sin(rotY), 0, Math.cos(rotY)];
+    const view: Vec3 = [holo[0] + n[0] * 17, 9, holo[2] + n[2] * 17];
+    const drift: Vec3 = [holo[0] + n[0] * 15, 9.6, holo[2] + n[2] * 15.4];
+    return { proj, side, z, chip: [side * 15.5, 0, z] as Vec3, holo, rotY, view, drift };
 });
 
-/** Neon skill signs hang off the facades along this stretch of avenue. */
-export const SIGN_STRETCH = { zStart: -150, zEnd: -206 };
-export const SKILL_SIGNS = skills.map((skill, i) => {
+/** Skill components line the bus; each carries a floating label. */
+export const SKILL_STRETCH = { zStart: -150, zEnd: -206 };
+export const SKILL_PARTS = skills.map((skill, i) => {
     const t = i / Math.max(1, skills.length - 1);
     const side = i % 2 === 0 ? -1 : 1;
-    const z = SIGN_STRETCH.zStart + (SIGN_STRETCH.zEnd - SIGN_STRETCH.zStart) * t;
-    const y = 5 + ((i * 7) % 5) * 2.4;
-    return { skill, side, pos: [side * 5.3, y, z] as Vec3 };
+    const z = SKILL_STRETCH.zStart + (SKILL_STRETCH.zEnd - SKILL_STRETCH.zStart) * t;
+    const y = 2.6 + ((i * 3) % 4) * 0.9;
+    return { skill, side, chip: [side * 7.2, 0, z] as Vec3, label: [side * 6.6, y, z] as Vec3 };
 });
 
-/** Experience towers stand on a plaza at the end of the avenue. */
-export const PLAZA_Z = -238;
-export const EXPERIENCE_TOWERS = experience.map((exp, i) => {
-    const x = (i - (experience.length - 1) / 2) * 17;
-    const screen: Vec3 = [x, 13, PLAZA_Z + 6.6];
-    return { exp, x, screen, view: [x * 0.85, 12.5, PLAZA_Z + 25] as Vec3 };
+/** Experience: RAM sticks standing in their slots. */
+export const SLOT_Z = -238;
+export const RAM_STICKS = experience.map((exp, i) => {
+    const x = (i - (experience.length - 1) / 2) * 14;
+    const face: Vec3 = [x, 4.9, SLOT_Z + 0.3];
+    return { exp, x, face, view: [x * 0.85, 5.4, SLOT_Z + 15] as Vec3 };
 });
 
-/** The last and tallest tower carries the portrait at its crown. */
-export const CROWN = { z: -268, height: 72, billboard: [0, 48, -259.6] as Vec3 };
-
-/** The portrait billboard you see first, on the very first tower. */
-export const INTRO_BILLBOARD: Vec3 = [-8.6, 16, -6];
+/** The processor at the end of the bus, with the portrait above its core. */
+export const CPU = { z: -276, size: 22, holo: [0, 11.5, -276] as Vec3 };
 
 /* ---------------------------------------------------------------- camera path */
 
-const NIGHT = '#060914';
-const INDIGO = '#0a0b22';
-const VIOLET = '#140a24';
+const DEEP = '#020708';
+const TEAL = '#03100f';
+const VIOLET = '#0b0717';
 
 export const CAMERA_KEYS: CameraKey[] = [
-    { p: 0.0, pos: [10, 78, 70], look: [0, 0, -90], fog: NIGHT, density: 0.0055 },
-    { p: 0.06, pos: [3, 22, 22], look: [-6, 14, -10], fog: NIGHT, density: 0.008 },
-    { p: 0.11, pos: [0, 11, 0], look: [0, 10, -40], fog: NIGHT, density: 0.01 },
+    { p: 0.0, pos: [16, 62, 58], look: [0, 0, -70], fog: DEEP, density: 0.012 },
+    { p: 0.06, pos: [2, 13, 16], look: INTRO_CHIP.holo, fog: DEEP, density: 0.01 },
+    { p: 0.11, pos: [0, 5, -4], look: [0, 3, -40], fog: TEAL, density: 0.014 },
 ];
 
-PROJECT_TOWERS.forEach((t, i) => {
+PROJECT_CHIPS.forEach((c, i) => {
     const base = 0.15 + i * 0.12;
     CAMERA_KEYS.push(
-        { p: base, pos: t.view, look: t.billboard, fog: INDIGO, density: 0.011 },
-        { p: base + 0.07, pos: t.drift, look: t.billboard, fog: INDIGO, density: 0.011 },
+        { p: base, pos: c.view, look: c.holo, fog: TEAL, density: 0.012 },
+        { p: base + 0.07, pos: c.drift, look: c.holo, fog: TEAL, density: 0.012 },
     );
 });
 
 CAMERA_KEYS.push(
-    { p: 0.53, pos: [0, 40, -118], look: [0, 6, -190], fog: NIGHT, density: 0.009 },
-    { p: 0.58, pos: [0, 9, -140], look: [0, 8, -175], roll: 0, fog: VIOLET, density: 0.012 },
-    { p: 0.645, pos: [0.8, 8.5, -168], look: [0, 9, -200], roll: 0.06, fog: VIOLET, density: 0.013 },
-    { p: 0.7, pos: [0, 9, -200], look: [0, 12, PLAZA_Z], roll: 0, fog: VIOLET, density: 0.012 },
+    { p: 0.53, pos: [0, 34, -118], look: [0, 0, -185], fog: DEEP, density: 0.014 },
+    { p: 0.58, pos: [0, 4.2, -138], look: [0, 3.4, -170], roll: 0, fog: VIOLET, density: 0.016 },
+    { p: 0.645, pos: [0.5, 4, -168], look: [0, 3.6, -200], roll: 0.05, fog: VIOLET, density: 0.016 },
+    { p: 0.7, pos: [0, 5, -203], look: [0, 5, SLOT_Z], roll: 0, fog: VIOLET, density: 0.014 },
 );
 
-EXPERIENCE_TOWERS.forEach((t, i) => {
+RAM_STICKS.forEach((s, i) => {
     const base = 0.73 + i * 0.045;
     CAMERA_KEYS.push(
-        { p: base, pos: t.view, look: t.screen, fog: INDIGO, density: 0.009 },
-        { p: base + 0.025, pos: [t.view[0], t.view[1] + 0.6, t.view[2] - 2], look: t.screen, fog: INDIGO, density: 0.009 },
+        { p: base, pos: s.view, look: s.face, fog: TEAL, density: 0.012 },
+        { p: base + 0.025, pos: [s.view[0], s.view[1] + 0.4, s.view[2] - 1.6], look: s.face, fog: TEAL, density: 0.012 },
     );
 });
 
 CAMERA_KEYS.push(
-    { p: 0.91, pos: [0, 47, -232], look: CROWN.billboard, fog: NIGHT, density: 0.006 },
-    { p: 1.0, pos: [0, 58, -196], look: [0, 42, CROWN.z], fog: NIGHT, density: 0.005 },
+    { p: 0.91, pos: [0, 13, -250], look: CPU.holo, fog: DEEP, density: 0.012 },
+    { p: 1.0, pos: [0, 38, -214], look: [0, 4, CPU.z], fog: DEEP, density: 0.013 },
 );
 
 /* ---------------------------------------------------------------- chapters (UI) */
 
 export const groups: ChapterGroup[] = [
-    { numeral: '01', label: 'The Developer', sub: 'Intro', thumb: '/profile.jpg', start: 0, end: 0.12 },
+    { numeral: '01', label: 'The Developer', sub: 'Boot', thumb: '/profile.jpg', start: 0, end: 0.12 },
     { numeral: '02', label: 'Selected Work', sub: `${projects.length} projects`, thumb: projects[0]?.image, start: 0.12, end: 0.53 },
-    { numeral: '03', label: 'The Stack', sub: `${skills.length} tools`, start: 0.53, end: 0.71 },
-    { numeral: '04', label: 'Experience', sub: `${experience.length} roles`, start: 0.71, end: 0.87 },
+    { numeral: '03', label: 'The Stack', sub: `${skills.length} components`, start: 0.53, end: 0.71 },
+    { numeral: '04', label: 'Experience', sub: `${experience.length} modules`, start: 0.71, end: 0.87 },
     { numeral: '05', label: 'Contact', sub: 'Let’s talk', thumb: '/profile.jpg', start: 0.87, end: 1 },
 ];
 
@@ -136,7 +137,7 @@ export const chapters: Chapter[] = [
         end: 0.08,
         eyebrow: `${personalInfo.title} · ${personalInfo.location}`,
         title: personalInfo.name,
-        caption: 'Three years of building for the web, laid out as a city. Scroll to drive through it.',
+        caption: 'Three years of building for the web, wired onto one board. Scroll to follow the signal.',
         mini: { image: '/profile.jpg', label: '01/05 · Portrait' },
     },
     {
@@ -144,25 +145,25 @@ export const chapters: Chapter[] = [
         group: 0,
         start: 0.08,
         end: 0.13,
-        whisper: 'Entering the city',
+        whisper: 'Booting up',
     },
-    ...PROJECT_TOWERS.map((t, i): Chapter => ({
-        id: t.proj.slug,
+    ...PROJECT_CHIPS.map((c, i): Chapter => ({
+        id: c.proj.slug,
         group: 1,
         start: 0.13 + i * 0.12,
         end: 0.13 + (i + 1) * 0.12,
-        eyebrow: `Project ${String(i + 1).padStart(2, '0')} · ${t.proj.tags.join(' / ')}`,
-        title: t.proj.title,
-        caption: t.proj.description,
-        mini: { image: t.proj.image, label: `02/05 · ${t.proj.tech.slice(0, 3).join(', ')}` },
-        cta: { label: 'case study', href: `/projects/${t.proj.slug}` },
+        eyebrow: `Project ${String(i + 1).padStart(2, '0')} · ${c.proj.tags.join(' / ')}`,
+        title: c.proj.title,
+        caption: c.proj.description,
+        mini: { image: c.proj.image, label: `02/05 · ${c.proj.tech.slice(0, 3).join(', ')}` },
+        cta: { label: 'case study', href: `/projects/${c.proj.slug}` },
     })),
     {
         id: 'interlude',
         group: 2,
         start: 0.49,
         end: 0.58,
-        whisper: 'Then the city lights up',
+        whisper: 'Then the signal splits',
     },
     {
         id: 'skills',
@@ -173,14 +174,14 @@ export const chapters: Chapter[] = [
         title: 'The Stack',
         caption: 'React, Node, Express and MongoDB at the core — TypeScript, Next.js, PHP and Python around it.',
     },
-    ...EXPERIENCE_TOWERS.map((t, i): Chapter => ({
-        id: `exp-${t.exp.id}`,
+    ...RAM_STICKS.map((s, i): Chapter => ({
+        id: `exp-${s.exp.id}`,
         group: 3,
         start: 0.71 + i * 0.05,
         end: 0.71 + (i + 1) * 0.05,
-        eyebrow: `${t.exp.period} · ${t.exp.location}`,
-        title: t.exp.company,
-        caption: `${t.exp.role}. ${t.exp.description}`,
+        eyebrow: `${s.exp.period} · ${s.exp.location}`,
+        title: s.exp.company,
+        caption: `${s.exp.role}. ${s.exp.description}`,
     })),
     {
         id: 'contact',
@@ -189,7 +190,7 @@ export const chapters: Chapter[] = [
         end: 1.01,
         eyebrow: personalInfo.email,
         title: 'Let’s build something',
-        caption: 'Available for freelance projects and full-time roles. Pick a block — I’ll build on it.',
+        caption: 'Available for freelance projects and full-time roles. Send the signal — I’ll process it.',
         mini: { image: '/profile.jpg', label: '05/05 · Contact' },
         cta: { label: 'say hello', href: `mailto:${personalInfo.email}`, external: true },
     },

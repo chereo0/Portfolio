@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { motion, useScroll, useMotionValueEvent, AnimatePresence } from 'framer-motion';
 import { Menu, X, Download } from 'lucide-react';
 import { Button } from './Button';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { clsx } from 'clsx';
 
 const navLinks = [
@@ -34,12 +35,16 @@ export const Navbar: React.FC = () => {
         };
     }, [isMobileMenuOpen]);
 
+    const navigate = useNavigate();
+    const location = useLocation();
+
+    // Sections live on the home page as chapters of the 3D city; from any other
+    // page, go home and let the journey jump to the matching chapter.
     const scrollToSection = (href: string) => {
         setIsMobileMenuOpen(false);
-        const element = document.querySelector(href);
-        if (element) {
-            element.scrollIntoView({ behavior: 'smooth' });
-        }
+        const element = location.pathname === '/' ? document.querySelector(href) : null;
+        if (element) element.scrollIntoView({ behavior: 'smooth' });
+        else navigate(`/${href}`);
     };
 
     return (
@@ -53,7 +58,7 @@ export const Navbar: React.FC = () => {
             )}
         >
             <div className="container mx-auto px-4 flex items-center justify-between">
-                <a href="#" className="text-2xl font-bold tracking-tighter text-white group relative z-[101]">
+                <a href="/" className="text-2xl font-bold tracking-tighter text-white group relative z-[101]">
                     <span className="text-neon-cyan">A</span>A
                     <span className="absolute -bottom-1 left-0 w-0 h-0.5 bg-neon-cyan transition-all group-hover:w-full"></span>
                 </a>

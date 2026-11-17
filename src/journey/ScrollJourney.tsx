@@ -5,6 +5,8 @@ import { JourneyScene } from './JourneyScene';
 import { chapters, groups, type Chapter } from './journeyData';
 import './journey.css';
 
+const HASH_TO_GROUP: Record<string, number> = { '#home': 0, '#about': 0, '#projects': 1, '#skills': 2, '#experience': 3 };
+
 const findChapter = (p: number) => Math.max(0, chapters.findIndex((c) => p >= c.start && p < c.end));
 
 export const ScrollJourney: React.FC = () => {
@@ -48,14 +50,28 @@ export const ScrollJourney: React.FC = () => {
             const total = track.offsetHeight - window.innerHeight;
             scene?.setTarget(total > 0 ? -rect.top / total : 0);
         };
-        // the 3D cards are drawn with the serif, so give it a moment to load first
+        // links like /#projects (from the project pages' menu) land on that chapter
+        const jumpToHash = () => {
+            const hash = window.location.hash;
+            if (!hash) return;
+            if (hash === '#contact') {
+                document.getElementById('contact')?.scrollIntoView();
+                return;
+            }
+            const group = HASH_TO_GROUP[hash];
+            if (group === undefined) return;
+            const top = track.getBoundingClientRect().top + window.scrollY;
+            window.scrollTo({ top: top + (groups[group].start + 0.03) * (track.offsetHeight - window.innerHeight) });
+        };
+        // the 3D signs are drawn with these fonts, so give it a moment to load first
         const fontsReady = Promise.all([
-            document.fonts.load('500 74px "Cormorant Garamond"'),
-            document.fonts.load('500 26px Inter'),
+            document.fonts.load('700 76px "Space Grotesk"'),
+            document.fonts.load('500 22px "JetBrains Mono"'),
         ]).catch(() => undefined);
         Promise.race([fontsReady, new Promise((r) => setTimeout(r, 1500))]).then(() => {
             if (cancelled) return;
             scene = new JourneyScene(canvas, onProgress);
+            jumpToHash();
             onScroll();
             setReady(true);
         });
@@ -102,7 +118,7 @@ export const ScrollJourney: React.FC = () => {
                             ))}
                         </button>
                         <div className="j-top-right">
-                            <span className="j-dot" /> scroll <span ref={pctRef}>0%</span>
+                            <span className="j-dot" /> <span className="j-scroll-word">scroll</span> <span ref={pctRef}>0%</span>
                         </div>
                     </header>
 
@@ -131,6 +147,7 @@ export const ScrollJourney: React.FC = () => {
                     {/* big title */}
                     {chapter.title && (
                         <div key={`t-${chapter.id}`} className="j-title-wrap">
+                            {chapter.caption && <p className="j-caption-inline">{chapter.caption}</p>}
                             <p className="j-eyebrow">{chapter.eyebrow}</p>
                             <h1 className="j-title">
                                 {chapter.title.split(' ').map((word, i) => (
@@ -158,7 +175,7 @@ export const ScrollJourney: React.FC = () => {
                                                 <span className="j-numeral">{g.numeral}</span>
                                             )}
                                             <span className="j-strip-text">
-                                                <small>{g.numeral}/V — {g.sub}</small>
+                                                <small>{g.numeral}/05 — {g.sub}</small>
                                                 <strong>{g.label}</strong>
                                             </span>
                                         </span>
